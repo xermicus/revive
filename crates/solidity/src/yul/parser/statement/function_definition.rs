@@ -3,7 +3,9 @@
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 
+use inkwell::debug_info::AsDIScope;
 use inkwell::types::BasicType;
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -265,13 +267,61 @@ where
         context: &mut revive_llvm_context::PolkaVMContext<D>,
     ) -> anyhow::Result<()> {
         context.set_current_function(self.identifier.as_str())?;
-        let r#return = context.current_function().borrow().r#return();
-
         context.set_basic_block(context.current_function().borrow().entry_block());
+
+        if let Some(dinfo) = context.debug_info() {
+            let di_builder = dinfo.builder();
+            context.builder().unset_current_debug_location();
+            let line_num: u32 = std::cmp::min(self.location.line, u32::MAX as usize) as u32;
+            let func_value = context
+                .current_function()
+                .borrow()
+                .declaration()
+                .function_value();
+            let func_name: &str = func_value
+                .get_name()
+                .to_str()
+                .unwrap_or(self.identifier.as_str());
+            let di_file = dinfo.compilation_unit().get_file();
+            let di_scope = dinfo.top_scope().expect("expected a debug-info scope");
+
+            let di_func_scope = match func_value.get_subprogram() {
+                Some(scp) => scp,
+                None => {
+                    let di_flags = inkwell::debug_info::DIFlagsConstants::PUBLIC;
+                    let ret_type = dinfo.create_word_type(Some(di_flags))?.as_type();
+                    let subroutine_type =
+                        di_builder.create_subroutine_type(di_file, Some(ret_type), &[], di_flags);
+                    let linkage = dinfo.namespace_as_identifier(Some(func_name));
+                    di_builder.create_function(
+                        di_scope,
+                        func_name,
+                        Some(linkage.as_str()),
+                        di_file,
+                        0,
+                        subroutine_type,
+                        false,
+                        true,
+                        1,
+                        di_flags,
+                        false,
+                    )
+                }
+            };
+            func_value.set_subprogram(di_func_scope);
+            dinfo.push_scope(di_func_scope.as_debug_info_scope());
+            let di_loc_scope = dinfo.top_scope().expect("expected a debug-info scope");
+            let di_loc =
+                di_builder.create_debug_location(context.llvm(), line_num, 0, di_loc_scope, None);
+            context.builder().set_current_debug_location(di_loc)
+        }
+
+        let r#return = context.current_function().borrow().r#return();
         match r#return {
             revive_llvm_context::PolkaVMFunctionReturn::None => {}
             revive_llvm_context::PolkaVMFunctionReturn::Primitive { pointer } => {
                 let identifier = self.result.pop().expect("Always exists");
+
                 let r#type = identifier.r#type.unwrap_or_default();
                 context.build_store(pointer, r#type.into_llvm(context).const_zero())?;
                 context
@@ -334,6 +384,18 @@ where
         }
 
         self.body.into_llvm(context)?;
+        if let Some(dinfo) = context.debug_info() {
+            let di_loc_scope = dinfo.top_scope().expect("expected a debug-info scope");
+            let line_num: u32 = std::cmp::min(self.location.line, u32::MAX as usize) as u32;
+            let di_loc = dinfo.builder().create_debug_location(
+                context.llvm(),
+                line_num,
+                0,
+                di_loc_scope,
+                None,
+            );
+            context.builder().set_current_debug_location(di_loc)
+        }
         match context
             .basic_block()
             .get_last_instruction()
@@ -365,6 +427,10 @@ where
                 let return_value = context.build_load(pointer, "return_value")?;
                 context.build_return(Some(&return_value));
             }
+        }
+
+        if let Some(dinfo) = context.debug_info() {
+            let _ = dinfo.pop_scope();
         }
 
         Ok(())

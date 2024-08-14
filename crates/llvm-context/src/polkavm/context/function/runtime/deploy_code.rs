@@ -8,6 +8,8 @@ use crate::polkavm::context::Context;
 use crate::polkavm::Dependency;
 use crate::polkavm::WriteLLVM;
 
+use inkwell::debug_info::AsDIScope;
+
 /// The deploy code function.
 /// Is a special function that is only used by the front-end generated code.
 #[derive(Debug)]
@@ -60,7 +62,57 @@ where
         context.set_basic_block(context.current_function().borrow().entry_block());
         context.set_code_type(CodeType::Deploy);
 
+        if let Some(dinfo) = context.debug_info() {
+            context.builder().unset_current_debug_location();
+            let di_builder = dinfo.builder();
+            let func_name: &str = runtime::FUNCTION_DEPLOY_CODE;
+            let di_file = dinfo.compilation_unit().get_file();
+            let di_scope = dinfo.top_scope().expect("expected a debug-info scope");
+
+            let di_flags = inkwell::debug_info::DIFlagsConstants::PUBLIC;
+            let ret_type = dinfo.create_word_type(Some(di_flags))?.as_type();
+            let subroutine_type =
+                di_builder.create_subroutine_type(di_file, Some(ret_type), &[], di_flags);
+            let linkage = dinfo.namespace_as_identifier(Some(func_name));
+            let di_func_scope = di_builder.create_function(
+                di_scope,
+                func_name,
+                Some(linkage.as_str()),
+                di_file,
+                0,
+                subroutine_type,
+                false,
+                true,
+                1,
+                di_flags,
+                false,
+            );
+            let func_value = context
+                .current_function()
+                .borrow()
+                .declaration()
+                .function_value();
+            func_value.set_subprogram(di_func_scope);
+            dinfo.push_scope(di_func_scope.as_debug_info_scope());
+            let di_loc = di_builder.create_debug_location(
+                context.llvm(),
+                0,
+                0,
+                di_func_scope.as_debug_info_scope(),
+                None,
+            );
+            context.builder().set_current_debug_location(di_loc)
+        }
+
         self.inner.into_llvm(context)?;
+        if let Some(dinfo) = context.debug_info() {
+            let di_loc_scope = dinfo.top_scope().expect("expected a debug-info scope");
+            let di_loc =
+                dinfo
+                    .builder()
+                    .create_debug_location(context.llvm(), 0, 0, di_loc_scope, None);
+            context.builder().set_current_debug_location(di_loc)
+        }
         match context
             .basic_block()
             .get_last_instruction()
@@ -73,7 +125,21 @@ where
         }
 
         context.set_basic_block(context.current_function().borrow().return_block());
+        if let Some(dinfo) = context.debug_info() {
+            context.builder().unset_current_debug_location();
+            let di_builder = dinfo.builder();
+            let di_parent_scope = dinfo
+                .top_scope()
+                .expect("expected an existing debug-info scope");
+            let di_loc =
+                di_builder.create_debug_location(context.llvm(), 0, 0, di_parent_scope, None);
+            context.builder().set_current_debug_location(di_loc)
+        }
         context.build_return(None);
+
+        if let Some(dinfo) = context.debug_info() {
+            let _ = dinfo.pop_scope();
+        }
 
         Ok(())
     }

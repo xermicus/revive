@@ -9,6 +9,8 @@ use crate::polkavm::r#const::*;
 use crate::polkavm::Dependency;
 use crate::polkavm::WriteLLVM;
 
+use inkwell::debug_info::AsDIScope;
+
 /// The entry function.
 /// The function is a wrapper managing the runtime and deploy code calling logic.
 /// Is a special runtime function that is only used by the front-end generated code.
@@ -138,6 +140,15 @@ impl Entry {
     where
         D: Dependency + Clone,
     {
+        if let Some(dinfo) = context.debug_info() {
+            let di_builder = dinfo.builder();
+            let di_scope = dinfo
+                .top_scope()
+                .expect("expected an existing debug-info scope");
+            let di_loc = di_builder.create_debug_location(context.llvm(), 0, 0, di_scope, None);
+            context.builder().set_current_debug_location(di_loc)
+        }
+
         let is_deploy = context
             .current_function()
             .borrow()
@@ -218,13 +229,81 @@ where
         context.set_current_function(runtime::FUNCTION_ENTRY)?;
         context.set_basic_block(context.current_function().borrow().entry_block());
 
-        Self::initialize_globals(context)?;
-        Self::load_calldata(context)?;
-        Self::leave_entry(context)?;
+        if let Some(dinfo) = context.debug_info() {
+            let di_builder = dinfo.builder();
+            let func_name: &str = runtime::FUNCTION_ENTRY;
+            let di_file = dinfo.compilation_unit().get_file();
+            let di_scope = dinfo.top_scope().expect("expected a debug-info scope");
 
+            let di_flags = inkwell::debug_info::DIFlagsConstants::PUBLIC;
+            let ret_type = dinfo.create_word_type(Some(di_flags))?.as_type();
+            let subroutine_type =
+                di_builder.create_subroutine_type(di_file, Some(ret_type), &[], di_flags);
+            let linkage = dinfo.namespace_as_identifier(Some(func_name));
+            let di_func_scope = di_builder.create_function(
+                di_scope,
+                func_name,
+                Some(linkage.as_str()),
+                di_file,
+                0,
+                subroutine_type,
+                false,
+                true,
+                1,
+                di_flags,
+                false,
+            );
+            let func_value = context
+                .current_function()
+                .borrow()
+                .declaration()
+                .function_value();
+            func_value.set_subprogram(di_func_scope);
+            dinfo.push_scope(di_func_scope.as_debug_info_scope());
+            let di_loc = di_builder.create_debug_location(
+                context.llvm(),
+                0,
+                0,
+                di_func_scope.as_debug_info_scope(),
+                None,
+            );
+            context.builder().set_current_debug_location(di_loc)
+        }
+
+        Self::initialize_globals(context)?;
+        if let Some(dinfo) = context.debug_info() {
+            let di_loc_scope = dinfo.top_scope().expect("expected a debug-info scope");
+            let di_loc =
+                dinfo
+                    .builder()
+                    .create_debug_location(context.llvm(), 0, 0, di_loc_scope, None);
+            context.builder().set_current_debug_location(di_loc)
+        }
+        Self::load_calldata(context)?;
+        if let Some(dinfo) = context.debug_info() {
+            let di_loc_scope = dinfo.top_scope().expect("expected a debug-info scope");
+            let di_loc =
+                dinfo
+                    .builder()
+                    .create_debug_location(context.llvm(), 0, 0, di_loc_scope, None);
+            context.builder().set_current_debug_location(di_loc)
+        }
+        Self::leave_entry(context)?;
+        if let Some(dinfo) = context.debug_info() {
+            let di_loc_scope = dinfo.top_scope().expect("expected a debug-info scope");
+            let di_loc =
+                dinfo
+                    .builder()
+                    .create_debug_location(context.llvm(), 0, 0, di_loc_scope, None);
+            context.builder().set_current_debug_location(di_loc)
+        }
         context.build_unconditional_branch(context.current_function().borrow().return_block());
         context.set_basic_block(context.current_function().borrow().return_block());
         context.build_unreachable();
+
+        if let Some(dinfo) = context.debug_info() {
+            let _ = dinfo.pop_scope();
+        }
 
         Ok(())
     }
