@@ -91,6 +91,23 @@ impl VariableDeclaration {
     }
 }
 
+fn set_debug_location<D>(
+    context: &revive_llvm_context::PolkaVMContext<'_, D>,
+    line_num: u32,
+) -> anyhow::Result<()>
+where
+    D: revive_llvm_context::PolkaVMDependency + Clone,
+{
+    if let Some(dinfo) = context.debug_info() {
+        let di_builder = dinfo.builder();
+        let di_parent_scope = dinfo.top_scope().expect("expected a debug-info scope");
+        let di_loc =
+            di_builder.create_debug_location(context.llvm(), line_num, 0, di_parent_scope, None);
+        context.builder().set_current_debug_location(di_loc);
+    }
+    Ok(())
+}
+
 impl<D> revive_llvm_context::PolkaVMWriteLLVM<D> for VariableDeclaration
 where
     D: revive_llvm_context::PolkaVMDependency + Clone,
@@ -101,7 +118,13 @@ where
     ) -> anyhow::Result<()> {
         if self.bindings.len() == 1 {
             let identifier = self.bindings.remove(0);
-            let r#type = identifier.r#type.unwrap_or_default().into_llvm(context);
+            if context.debug_info().is_some() {
+                let line_num: u32 =
+                    std::cmp::min(identifier.location.line, u32::MAX as usize) as u32;
+                let _ = set_debug_location(context, line_num);
+            };
+            let identifier_type = identifier.r#type.clone().unwrap_or_default();
+            let r#type = identifier_type.into_llvm(context);
             let pointer = context.build_alloca(r#type, identifier.inner.as_str());
             context
                 .current_function()
@@ -116,7 +139,7 @@ where
                                 .current_function()
                                 .borrow_mut()
                                 .yul_mut()
-                                .insert_constant(identifier.inner, constant);
+                                .insert_constant(identifier.inner.clone(), constant);
                         }
 
                         value.to_llvm()
@@ -131,6 +154,10 @@ where
         }
 
         for (index, binding) in self.bindings.iter().enumerate() {
+            if context.debug_info().is_some() {
+                let line_num: u32 = std::cmp::min(binding.location.line, u32::MAX as usize) as u32;
+                let _ = set_debug_location(context, line_num);
+            };
             let yul_type = binding
                 .r#type
                 .to_owned()

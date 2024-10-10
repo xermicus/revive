@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use inkwell::debug_info::AsDIScope;
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -217,15 +219,55 @@ where
     }
 
     fn into_llvm(self, context: &mut revive_llvm_context::PolkaVMContext<D>) -> anyhow::Result<()> {
+        if let Some(dinfo) = context.debug_info() {
+            let di_builder = dinfo.builder();
+            let object_name: &str = self.identifier.as_str();
+            let di_parent_scope = dinfo
+                .top_scope()
+                .expect("expected an existing debug-info scope");
+            let object_scope = di_builder.create_namespace(di_parent_scope, object_name, true);
+            dinfo.push_scope(object_scope.as_debug_info_scope());
+            dinfo.push_namespace(object_name.to_string());
+        }
+
         if self.identifier.ends_with("_deployed") {
             revive_llvm_context::PolkaVMImmutableDataLoadFunction.into_llvm(context)?;
             revive_llvm_context::PolkaVMRuntimeCodeFunction::new(self.code).into_llvm(context)?;
         } else {
             revive_llvm_context::PolkaVMDeployCodeFunction::new(self.code).into_llvm(context)?;
         }
+        if let Some(dinfo) = context.debug_info() {
+            let di_loc_scope = dinfo.top_scope().expect("expected a debug-info scope");
+            let line_num: u32 = std::cmp::min(self.location.line, u32::MAX as usize) as u32;
+            let di_loc = dinfo.builder().create_debug_location(
+                context.llvm(),
+                line_num,
+                0,
+                di_loc_scope,
+                None,
+            );
+            context.builder().set_current_debug_location(di_loc)
+        }
 
         if let Some(object) = self.inner_object {
             object.into_llvm(context)?;
+        }
+        if let Some(dinfo) = context.debug_info() {
+            let di_loc_scope = dinfo.top_scope().expect("expected a debug-info scope");
+            let line_num: u32 = std::cmp::min(self.location.line, u32::MAX as usize) as u32;
+            let di_loc = dinfo.builder().create_debug_location(
+                context.llvm(),
+                line_num,
+                0,
+                di_loc_scope,
+                None,
+            );
+            context.builder().set_current_debug_location(di_loc)
+        }
+
+        if let Some(dinfo) = context.debug_info() {
+            dinfo.pop_namespace();
+            dinfo.pop_scope();
         }
 
         Ok(())
